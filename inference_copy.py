@@ -1,4 +1,3 @@
-import math
 from os import listdir, path
 import numpy as np
 import scipy, cv2, os, sys, argparse, audio
@@ -59,7 +58,6 @@ args.audio = 'inputs/audio1.wav'
 args.face = 'inputs/guiji.mp4'
 # args.face = 'inputs/zsw.png'
 args.img_size = 96
-args.frame_batch_size = 300
 
 if os.path.isfile(args.face) and args.face.split('.')[1] in ['jpg', 'png', 'jpeg']:
     args.static = True
@@ -131,8 +129,7 @@ def datagen(frames, mels):
         face_det_results = [[f[y1: y2, x1:x2], (y1, y2, x1, x2)] for f in frames]
 
     for i, m in enumerate(mels):
-        # idx = 0 if args.static else i % len(frames)
-        idx = i
+        idx = 0 if args.static else i % len(frames)
         frame_to_save = frames[idx].copy()
         face, coords = face_det_results[idx].copy()
 
@@ -206,11 +203,30 @@ def main():
     else:
         video_stream = cv2.VideoCapture(args.face)
         fps = video_stream.get(cv2.CAP_PROP_FPS)
-        frame_total = video_stream.get(7)
 
         print('Reading video frames...')
 
-    print("Number of frames available for inference: " + str(frame_total))
+        full_frames = []
+        while 1:
+            still_reading, frame = video_stream.read()
+            if not still_reading:
+                video_stream.release()
+                break
+            if args.resize_factor > 1:
+                frame = cv2.resize(frame, (frame.shape[1] // args.resize_factor, frame.shape[0] // args.resize_factor))
+
+            if args.rotate:
+                frame = cv2.rotate(frame, cv2.cv2.ROTATE_90_CLOCKWISE)
+            # 判断是否对从视频读出的帧进行裁剪，若不裁剪，则取帧图像上所有像素点(保留原图)
+            y1, y2, x1, x2 = args.crop
+            if x2 == -1: x2 = frame.shape[1]
+            if y2 == -1: y2 = frame.shape[0]
+
+            frame = frame[y1:y2, x1:x2]
+
+            full_frames.append(frame)
+
+    print("Number of frames available for inference: " + str(len(full_frames)))
     # 若输入的音频格式不是wav,则通过ffmpeg转成wav
     if not args.audio.endswith('.wav'):
         print('Extracting raw audio...')
@@ -242,84 +258,61 @@ def main():
         i += 1
 
     print("Length of mel chunks: {}".format(len(mel_chunks)))
-    if len(mel_chunks) < frame_total:
-        frame_total = len(mel_chunks)
-    for video_idx in range(math.ceil(len(mel_chunks) / frame_total)):
-        start_vi = int(video_idx * frame_total)
-        end_vi = int((video_idx + 1) * frame_total)
-        if end_vi > len(mel_chunks):
-            end_vi = len(mel_chunks)
-        mel_vb = mel_chunks[start_vi:end_vi]
-        for frame_idx in range(math.ceil(frame_total / args.frame_batch_size)):
-            full_frames = []
-            while 1:
-                still_reading, frame = video_stream.read()
-                if not still_reading:
-                    video_stream.release()
-                    video_stream = cv2.VideoCapture(args.face)
-                    break
-                if args.resize_factor > 1:
-                    frame = cv2.resize(frame,
-                                       (frame.shape[1] // args.resize_factor, frame.shape[0] // args.resize_factor))
+    # 在python中进行切片是允许索引越界，取不到就为空
+    full_frames = full_frames[:len(mel_chunks)]
 
-                if args.rotate:
-                    frame = cv2.rotate(frame, cv2.cv2.ROTATE_90_CLOCKWISE)
-                # 判断是否对从视频读出的帧进行裁剪，若不裁剪，则取帧图像上所有像素点(保留原图)
-                y1, y2, x1, x2 = args.crop
-                if x2 == -1: x2 = frame.shape[1]
-                if y2 == -1: y2 = frame.shape[0]
+    batch_size = args.wav2lip_batch_size
+    gen = datagen(full_frames.copy(), mel_chunks)
 
-                frame = frame[y1:y2, x1:x2]
-                full_frames.append(frame)
-                if (video_idx == math.ceil(len(mel_chunks) / frame_total) - 1) \
-                        and (frame_idx == math.ceil(frame_total / args.frame_batch_size) - 1):
-                    if len(full_frames) == (len(mel_vb) - args.frame_batch_size * frame_idx):
-                        video_stream.release()
-                        break
-                if len(full_frames) == args.frame_batch_size:
-                    if frame_idx == math.ceil(frame_total / args.frame_batch_size) - 1:
-                        video_stream.release()
-                        video_stream = cv2.VideoCapture(args.face)
-                    break
+    for i, (img_batch, mel_batch, frames, coords) in enumerate(tqdm(gen,
+                                                                    total=int(
+                                                                        np.ceil(float(len(mel_chunks)) / batch_size)))):
+        # img_batch 脸部经过resize和脸下半部分被遮挡以后的图
+        # mel_batch 声音数据
+        # frames 原图，从视频中直接获取的帧
+        # coords 脸部在frames上的位置信息
+        # ----------------------可视化----------------------------
+        # if not os.path.exists('visual'):
+        #     os.mkdir('visual')
+        # img = (img_batch[0][:, :, :3]) * 255.0
+        # img = np.array(img, dtype=np.uint8)
+        # cv2.imwrite('visual/img.jpg', img)
+        # frame = (frames[0][:, :, :3])
+        # frame = np.array(frame, dtype=np.uint8)
+        # cv2.imwrite('visual/frame.jpg', frame)
+        # coord = coords[0]
+        # coord_frame = frame[coord[0]:coord[1], coord[2]:coord[3], :]
+        # cv2.imwrite('visual/coord_frame.jpg', coord_frame)
+        # resize_coord_frame = cv2.resize(coord_frame, (args.img_size, args.img_size))
+        # cv2.imwrite('visual/resize_coord_frame.jpg', resize_coord_frame)
+        # block_resize_coord_frame = resize_coord_frame[:int(args.img_size / 2), :, :]
+        # add = np.zeros([int(args.img_size / 2), args.img_size, 3])
+        # block_resize_coord_frame = np.concatenate([block_resize_coord_frame, add], axis=0)
+        # block_resize_coord_frame = np.array(block_resize_coord_frame, dtype=np.uint8)
+        # cv2.imwrite('visual/block_resize_coord_frame.jpg', block_resize_coord_frame)
+        # --------------------------------------------------
+        if i == 0:
+            model = load_model(args.checkpoint_path)
+            print("Model loaded")
 
+            frame_h, frame_w = full_frames[0].shape[:-1]
+            out = cv2.VideoWriter('temp/result.avi',
+                                  cv2.VideoWriter_fourcc(*'DIVX'), fps, (frame_w, frame_h))
 
-            if frame_idx == 0 and video_idx == 0:
-                model = load_model(args.checkpoint_path)
-                print("Model loaded")
+        img_batch = torch.FloatTensor(np.transpose(img_batch, (0, 3, 1, 2))).to(device)
+        mel_batch = torch.FloatTensor(np.transpose(mel_batch, (0, 3, 1, 2))).to(device)
 
-                frame_h, frame_w = full_frames[0].shape[:-1]
-                out = cv2.VideoWriter('temp/result.avi',
-                                      cv2.VideoWriter_fourcc(*'DIVX'), fps, (frame_w, frame_h))
-            batch_size = args.wav2lip_batch_size
-            # -------------------------------------------------
-            start = int(frame_idx * args.frame_batch_size)
-            end = int((frame_idx + 1) * args.frame_batch_size)
-            if end > len(mel_vb):
-                end = int(len(mel_vb))
-            mel_bh = mel_chunks[start:end]
-            assert len(mel_bh) == len(full_frames), print("i={}, j={},mel_bh和full_frames不相等".format(video_idx, frame_idx))
-            # -------------------------------------------------
-            gen = datagen(full_frames.copy(), mel_bh)
+        with torch.no_grad():
+            pred = model(mel_batch, img_batch)
 
-            for i, (img_batch, mel_batch, frames, coords) in enumerate(tqdm(gen,
-                                                                            total=int(
-                                                                                np.ceil(
-                                                                                    float(
-                                                                                        len(mel_bh)) / batch_size)))):
-                img_batch = torch.FloatTensor(np.transpose(img_batch, (0, 3, 1, 2))).to(device)
-                mel_batch = torch.FloatTensor(np.transpose(mel_batch, (0, 3, 1, 2))).to(device)
+        pred = pred.cpu().numpy().transpose(0, 2, 3, 1) * 255.
 
-                with torch.no_grad():
-                    pred = model(mel_batch, img_batch)
+        for p, f, c in zip(pred, frames, coords):
+            y1, y2, x1, x2 = c
+            p = cv2.resize(p.astype(np.uint8), (x2 - x1, y2 - y1))
 
-                pred = pred.cpu().numpy().transpose(0, 2, 3, 1) * 255.
-
-                for p, f, c in zip(pred, frames, coords):
-                    y1, y2, x1, x2 = c
-                    p = cv2.resize(p.astype(np.uint8), (x2 - x1, y2 - y1))
-
-                    f[y1:y2, x1:x2] = p
-                    out.write(f)
+            f[y1:y2, x1:x2] = p
+            out.write(f)
 
     out.release()
     command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {}'.format(args.audio, 'temp/result.avi', args.outfile)
