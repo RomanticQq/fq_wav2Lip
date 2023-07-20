@@ -35,7 +35,7 @@ parser.add_argument('--face_det_batch_size', type=int,
 # 生成口型的人脸时一次生成多少张图片
 parser.add_argument('--wav2lip_batch_size', type=int, help='Batch size for Wav2Lip model(s)', default=128)
 # 多生成的视频进行resize,默认为1，表示不进行resize操作
-parser.add_argument('--resize_factor', default=1, type=int,
+parser.add_argument('--resize_factor', default=5, type=int,
                     help='Reduce the resolution by this factor. Sometimes, best results are obtained at 480p or 720p')
 # 设置对视频进行裁切的大小，应用于resize_factor和rotate之后
 parser.add_argument('--crop', nargs='+', type=int, default=[0, -1, 0, -1],
@@ -55,8 +55,8 @@ parser.add_argument('--nosmooth', default=False, action='store_true',
 
 args = parser.parse_args()
 args.checkpoint_path = 'checkpoints/wav2lip.pth'
-args.audio = 'inputs/audio1.wav'
-args.face = 'inputs/guiji.mp4'
+args.audio = 'inputs/718.mp3'
+args.face = 'inputs/718.mp4'
 # args.face = 'inputs/zsw.png'
 args.img_size = 96
 args.frame_batch_size = 300
@@ -271,8 +271,10 @@ def main():
 
                 frame = frame[y1:y2, x1:x2]
                 full_frames.append(frame)
+                # 当它是video_idx和frame_idx都是最后一次循环的时候
                 if (video_idx == math.ceil(len(mel_chunks) / frame_total) - 1) \
                         and (frame_idx == math.ceil(frame_total / args.frame_batch_size) - 1):
+                    # 不需要将视频读完，只需要读到音频结束即可
                     if len(full_frames) == (len(mel_vb) - args.frame_batch_size * frame_idx):
                         video_stream.release()
                         break
@@ -296,7 +298,7 @@ def main():
             end = int((frame_idx + 1) * args.frame_batch_size)
             if end > len(mel_vb):
                 end = int(len(mel_vb))
-            mel_bh = mel_chunks[start:end]
+            mel_bh = mel_vb[start:end]
             assert len(mel_bh) == len(full_frames), print("i={}, j={},mel_bh和full_frames不相等".format(video_idx, frame_idx))
             # -------------------------------------------------
             gen = datagen(full_frames.copy(), mel_bh)
